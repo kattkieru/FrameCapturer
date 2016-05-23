@@ -14,10 +14,15 @@
 *.tlog
 *.mp4
 *.h264
+*.aac
 *.exr
+*.gif
+*.png
+*.dll
 
 _out/
 _tmp/
+external/
 Library/
 Temp/
 Build/
@@ -26,6 +31,7 @@ Hidden.meta
 _Hidden/
 _Hidden.meta
 obj/
+libs/
 
 openh264-*
 FrameCapturer/*.csproj

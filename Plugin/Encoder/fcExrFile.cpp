@@ -1,7 +1,5 @@
 ﻿#include "pch.h"
-#include "FrameCapturer.h"
 
-#ifdef fcSupportEXR
 #include <half.h>
 #include <ImfRgbaFile.h>
 #include <ImfOutputFile.h>
@@ -16,25 +14,25 @@
 #include "fcExrFile.h"
 
 #if defined(fcWindows) && !defined(fcNoAutoLink)
-#pragma comment(lib, "Half.lib")
-#pragma comment(lib, "Iex-2_2.lib")
-#pragma comment(lib, "IexMath-2_2.lib")
-#pragma comment(lib, "IlmThread-2_2.lib")
-#pragma comment(lib, "IlmImf-2_2.lib")
-#pragma comment(lib, "zlibstatic.lib")
+    #pragma comment(lib, "Half.lib")
+    #pragma comment(lib, "Iex-2_2.lib")
+    #pragma comment(lib, "IexMath-2_2.lib")
+    #pragma comment(lib, "IlmThread-2_2.lib")
+    #pragma comment(lib, "IlmImf-2_2.lib")
+    #pragma comment(lib, "zlibstatic.lib")
 #endif
 
 
 
-struct fcExrFrameData
+struct fcExrTaskData
 {
     std::string path;
     int width, height;
-    std::list<std::string> raw_frames;
+    std::list<Buffer> pixels;
     Imf::Header header;
     Imf::FrameBuffer frame_buffer;
 
-    fcExrFrameData(const char *p, int w, int h)
+    fcExrTaskData(const char *p, int w, int h)
         : path(p), width(w), height(h), header(w, h)
     {
         header.compression() = Imf::ZIPS_COMPRESSION;
@@ -44,42 +42,50 @@ struct fcExrFrameData
 class fcExrContext : public fcIExrContext
 {
 public:
-    fcExrContext(fcExrConfig &conf, fcIGraphicsDevice *dev);
+    fcExrContext(const fcExrConfig& conf, fcIGraphicsDevice *dev);
     ~fcExrContext();
     void release() override;
     bool beginFrame(const char *path, int width, int height) override;
-    bool addLayerTexture(void *tex, fcTextureFormat fmt, int channel, const char *name, bool flipY) override;
+    bool addLayerTexture(void *tex, fcPixelFormat fmt, int channel, const char *name, bool flipY) override;
     bool addLayerPixels(const void *pixels, fcPixelFormat fmt, int channel, const char *name, bool flipY) override;
     bool endFrame() override;
 
 private:
-    void endFrameTask(fcExrFrameData *exr);
+    bool addLayerImpl(char *pixels, fcPixelFormat fmt, int channel, const char *name);
+    void endFrameTask(fcExrTaskData *exr);
 
 private:
     fcExrConfig m_conf;
     fcIGraphicsDevice *m_dev;
-    fcExrFrameData *m_exr;
+    fcExrTaskData *m_task;
     fcTaskGroup m_tasks;
-    std::atomic<int> m_active_task_count;
+    std::atomic_int m_active_task_count;
 
-    const void *m_tex_prev;
+    const void *m_frame_prev;
+    Buffer *m_src_prev;
+    fcPixelFormat m_fmt_prev;
 };
 
 
-fcExrContext::fcExrContext(fcExrConfig &conf, fcIGraphicsDevice *dev)
-    : m_conf(conf)
+fcExrContext::fcExrContext(const fcExrConfig& conf, fcIGraphicsDevice *dev)
+    : m_conf()
     , m_dev(dev)
-    , m_exr(nullptr)
+    , m_task(nullptr)
     , m_active_task_count(0)
-    , m_tex_prev(nullptr)
+    , m_frame_prev(nullptr)
+    , m_src_prev(nullptr)
+    , m_fmt_prev()
 {
+    m_conf = conf;
+    if (m_conf.max_active_tasks <= 0) {
+        m_conf.max_active_tasks = std::thread::hardware_concurrency();
+    }
 }
 
 fcExrContext::~fcExrContext()
 {
     m_tasks.wait();
 }
-
 
 
 void fcExrContext::release()
@@ -89,7 +95,10 @@ void fcExrContext::release()
 
 bool fcExrContext::beginFrame(const char *path, int width, int height)
 {
-    if (m_exr != nullptr) { return false; } // beginFrame() されたまま endFrame() されてない
+    if (m_task != nullptr) {
+        fcDebugLog("fcExrContext::beginFrame(): beginFrame() is already called. maybe you forgot to call endFrame().");
+        return false;
+    }
 
     // 実行中のタスクの数が上限に達している場合適当に待つ
     if (m_active_task_count >= m_conf.max_active_tasks)
@@ -101,140 +110,153 @@ bool fcExrContext::beginFrame(const char *path, int width, int height)
         }
     }
 
-    m_exr = new fcExrFrameData(path, width, height);
+    m_task = new fcExrTaskData(path, width, height);
     return true;
 }
 
-
-// pitch: width * pixel size
-static void fcImageFlipY(void *image_, int width, int height, int pitch)
+bool fcExrContext::addLayerTexture(void *tex, fcPixelFormat fmt, int channel, const char *name, bool flipY)
 {
-    std::vector<char> buf_(pitch);
-    char *image = (char*)image_;
-    char *buf = &buf_[0];
-
-    for (int y = 0; y < height / 2; ++y) {
-        int iy = height - y - 1;
-        memcpy(buf, image + (pitch*y), pitch);
-        memcpy(image + (pitch*y), image + (pitch*iy), pitch);
-        memcpy(image + (pitch*iy), buf, pitch);
+    if (m_dev == nullptr) {
+        fcDebugLog("fcExrContext::addLayerTexture(): gfx device is null.");
+        return false;
     }
-}
+    if (m_task == nullptr) {
+        fcDebugLog("fcExrContext::addLayerTexture(): maybe beginFrame() is not called.");
+        return false;
+    }
 
-bool fcExrContext::addLayerTexture(void *tex, fcTextureFormat fmt, int channel, const char *name, bool flipY)
-{
-    std::string *raw_frame = nullptr;
+    Buffer *raw_frame = nullptr;
 
-    // フレームバッファの内容取得
-    if (tex == m_tex_prev)
+    if (tex == m_frame_prev)
     {
-        // 前回取得した結果を使い回す
-        raw_frame = &m_exr->raw_frames.back();
+        raw_frame = m_src_prev;
+        fmt = m_fmt_prev;
     }
     else
     {
-        m_tex_prev = tex;
-        m_exr->raw_frames.push_back(std::string());
-        raw_frame = &m_exr->raw_frames.back();
-        raw_frame->resize(m_exr->width * m_exr->height * fcGetPixelSize(fmt));
-        if (!m_dev->readTexture(&(*raw_frame)[0], raw_frame->size(), tex, m_exr->width, m_exr->height, fmt))
+        m_frame_prev = tex;
+
+        m_task->pixels.push_back(Buffer());
+        raw_frame = &m_task->pixels.back();
+        raw_frame->resize(m_task->width * m_task->height * fcGetPixelSize(fmt));
+
+        // get frame buffer
+        if (!m_dev->readTexture(&(*raw_frame)[0], raw_frame->size(), tex, m_task->width, m_task->height, fmt))
         {
-            m_exr->raw_frames.pop_back();
+            m_task->pixels.pop_back();
             return false;
         }
         if (flipY) {
-            fcImageFlipY(&(*raw_frame)[0], m_exr->width, m_exr->height, m_exr->width * fcGetPixelSize(fmt));
+            fcImageFlipY(&(*raw_frame)[0], m_task->width, m_task->height, fmt);
         }
+        m_src_prev = raw_frame;
+
+        // convert pixel format if it is not supported by exr
+        if ((fmt & fcPixelFormat_TypeMask) == fcPixelFormat_Type_u8) {
+            m_task->pixels.emplace_back(Buffer());
+            auto *buf = &m_task->pixels.back();
+
+            int channels = fmt & fcPixelFormat_ChannelMask;
+            auto src_fmt = fmt;
+            fmt = fcPixelFormat(fcPixelFormat_Type_f16 | channels);
+            buf->resize(m_task->width * m_task->height * fcGetPixelSize(fmt));
+            fcConvertPixelFormat(&(*buf)[0], fmt, &(*raw_frame)[0], src_fmt, m_task->width * m_task->height);
+
+            m_src_prev = raw_frame = buf;
+        }
+
+        m_fmt_prev = fmt;
     }
 
-    {
-        Imf::PixelType pixel_type = Imf::HALF;
-        int channels = 0;
-        int tsize = 0;
-        switch (fmt)
-        {
-        case fcTextureFormat_ARGBHalf:  pixel_type = Imf::HALF; channels = 4; tsize = 2; break;
-        case fcTextureFormat_RGHalf:    pixel_type = Imf::HALF; channels = 2; tsize = 2; break;
-        case fcTextureFormat_RHalf:     pixel_type = Imf::HALF; channels = 1; tsize = 2; break;
-        case fcTextureFormat_ARGBFloat: pixel_type = Imf::FLOAT; channels = 4; tsize = 4; break;
-        case fcTextureFormat_RGFloat:   pixel_type = Imf::FLOAT; channels = 2; tsize = 4; break;
-        case fcTextureFormat_RFloat:    pixel_type = Imf::FLOAT; channels = 1; tsize = 4; break;
-        case fcTextureFormat_ARGBInt:   pixel_type = Imf::UINT; channels = 4; tsize = 4; break;
-        case fcTextureFormat_RGInt:     pixel_type = Imf::UINT; channels = 2; tsize = 4; break;
-        case fcTextureFormat_RInt:      pixel_type = Imf::UINT; channels = 1; tsize = 4; break;
-        default:
-            m_exr->raw_frames.pop_back();
-            return false;
-        }
-        int psize = tsize * channels;
-
-        char *raw_data = &(*raw_frame)[0];
-        m_exr->header.channels().insert(name, Imf::Channel(pixel_type));
-        m_exr->frame_buffer.insert(name, Imf::Slice(pixel_type, raw_data + (tsize * channel), psize, psize * m_exr->width));
-    }
-    return true;
+    return addLayerImpl(&(*raw_frame)[0], fmt, channel, name);
 }
 
 bool fcExrContext::addLayerPixels(const void *pixels, fcPixelFormat fmt, int channel, const char *name, bool flipY)
 {
-    std::string *raw_frame = nullptr;
+    if (m_task == nullptr) {
+        fcDebugLog("fcExrContext::addLayerPixels(): maybe beginFrame() is not called.");
+        return false;
+    }
 
-    // フレームバッファの内容取得
-    if (pixels == m_tex_prev)
+    Buffer *raw_frame = nullptr;
+
+    if (pixels == m_frame_prev)
     {
-        // 前回取得した結果を使い回す
-        raw_frame = &m_exr->raw_frames.back();
+        raw_frame = m_src_prev;
+        fmt = m_fmt_prev;
     }
     else
     {
-        m_tex_prev = pixels;
-        m_exr->raw_frames.push_back(std::string());
-        raw_frame = &m_exr->raw_frames.back();
-        raw_frame->resize(m_exr->width * m_exr->height * fcGetPixelSize(fmt));
-        memcpy(&(*raw_frame)[0], pixels, raw_frame->size());
+        m_frame_prev = pixels;
+
+        m_task->pixels.emplace_back(Buffer());
+        raw_frame = &m_task->pixels.back();
+
+        // convert pixel format if it is not supported by exr
+        if ((fmt & fcPixelFormat_TypeMask) == fcPixelFormat_Type_u8) {
+            int channels = fmt & fcPixelFormat_ChannelMask;
+            auto src_fmt = fmt;
+            fmt = fcPixelFormat(fcPixelFormat_Type_f16 | channels);
+            raw_frame->resize(m_task->width * m_task->height * (2 * channels));
+            fcConvertPixelFormat(&(*raw_frame)[0], fmt, pixels, src_fmt, m_task->width * m_task->height);
+        }
+        else {
+            raw_frame->resize(m_task->width * m_task->height * fcGetPixelSize(fmt));
+            memcpy(&(*raw_frame)[0], pixels, raw_frame->size());
+        }
         if (flipY) {
-            fcImageFlipY(&(*raw_frame)[0], m_exr->width, m_exr->height, m_exr->width * fcGetPixelSize(fmt));
+            fcImageFlipY(&(*raw_frame)[0], m_task->width, m_task->height, fmt);
         }
+
+        m_src_prev = raw_frame;
+        m_fmt_prev = fmt;
     }
 
+    return addLayerImpl(&(*raw_frame)[0], fmt, channel, name);
+}
+
+bool fcExrContext::addLayerImpl(char *pixels, fcPixelFormat fmt, int channel, const char *name)
+{
+    Imf::PixelType pixel_type = Imf::HALF;
+    int channels = fmt & fcPixelFormat_ChannelMask;
+    int tsize = 0;
+    switch (fmt & fcPixelFormat_TypeMask)
     {
-        Imf::PixelType pixel_type = Imf::HALF;
-        int channels = 0;
-        int tsize = 0;
-        switch (fmt)
-        {
-        case fcPixelFormat_RGBAHalf:  pixel_type = Imf::HALF; channels = 4; tsize = 2; break;
-        case fcPixelFormat_RGBHalf:   pixel_type = Imf::HALF; channels = 3; tsize = 2; break;
-        case fcPixelFormat_RGHalf:    pixel_type = Imf::HALF; channels = 2; tsize = 2; break;
-        case fcPixelFormat_RHalf:     pixel_type = Imf::HALF; channels = 1; tsize = 2; break;
-        case fcPixelFormat_RGBAFloat: pixel_type = Imf::FLOAT; channels = 4; tsize = 4; break;
-        case fcPixelFormat_RGBFloat:  pixel_type = Imf::FLOAT; channels = 3; tsize = 4; break;
-        case fcPixelFormat_RGFloat:   pixel_type = Imf::FLOAT; channels = 2; tsize = 4; break;
-        case fcPixelFormat_RFloat:    pixel_type = Imf::FLOAT; channels = 1; tsize = 4; break;
-        case fcPixelFormat_RGBAInt:   pixel_type = Imf::UINT; channels = 4; tsize = 4; break;
-        case fcPixelFormat_RGBInt:    pixel_type = Imf::UINT; channels = 3; tsize = 4; break;
-        case fcPixelFormat_RGInt:     pixel_type = Imf::UINT; channels = 2; tsize = 4; break;
-        case fcPixelFormat_RInt:      pixel_type = Imf::UINT; channels = 1; tsize = 4; break;
-        default:
-            m_exr->raw_frames.pop_back();
-            return false;
-        }
-        int psize = tsize * channels;
-
-        char *raw_data = &(*raw_frame)[0];
-        m_exr->header.channels().insert(name, Imf::Channel(pixel_type));
-        m_exr->frame_buffer.insert(name, Imf::Slice(pixel_type, raw_data + (tsize * channel), psize, psize * m_exr->width));
+    case fcPixelFormat_Type_f16:
+        pixel_type = Imf::HALF;
+        tsize = 2;
+        break;
+    case fcPixelFormat_Type_f32:
+        pixel_type = Imf::FLOAT;
+        tsize = 4;
+        break;
+    case fcPixelFormat_Type_i32:
+        pixel_type = Imf::UINT;
+        tsize = 4;
+        break;
+    default:
+        fcDebugLog("fcExrContext::addLayerPixels(): this pixel format is not supported");
+        return false;
     }
+    int psize = tsize * channels;
+
+    m_task->header.channels().insert(name, Imf::Channel(pixel_type));
+    m_task->frame_buffer.insert(name, Imf::Slice(pixel_type, pixels + (tsize * channel), psize, psize * m_task->width));
     return true;
 }
 
+
 bool fcExrContext::endFrame()
 {
-    if (m_exr == nullptr) { return false; } // beginFrame() されてない
-    m_tex_prev = nullptr;
+    if (m_task == nullptr) {
+        fcDebugLog("fcExrContext::endFrame(): maybe beginFrame() is not called.");
+        return false;
+    }
 
-    fcExrFrameData *exr = m_exr;
-    m_exr = nullptr;
+    m_frame_prev = nullptr;
+
+    fcExrTaskData *exr = m_task;
+    m_task = nullptr;
     ++m_active_task_count;
     m_tasks.run([this, exr](){
         endFrameTask(exr);
@@ -243,17 +265,23 @@ bool fcExrContext::endFrame()
     return true;
 }
 
-void fcExrContext::endFrameTask(fcExrFrameData *exr)
+void fcExrContext::endFrameTask(fcExrTaskData *exr)
 {
-    Imf::OutputFile fout(exr->path.c_str(), exr->header);
-    fout.setFrameBuffer(exr->frame_buffer);
-    fout.writePixels(exr->height);
-    delete exr;
+    try {
+        Imf::OutputFile fout(exr->path.c_str(), exr->header);
+        fout.setFrameBuffer(exr->frame_buffer);
+        fout.writePixels(exr->height);
+        delete exr;
+    }
+    catch (std::string &e) {
+        fcDebugLog(e.c_str());
+    }
 }
 
 
-fcCLinkage fcExport fcIExrContext* fcExrCreateContextImpl(fcExrConfig &conf, fcIGraphicsDevice *dev)
+fcCLinkage fcExport fcIExrContext* fcExrCreateContextImpl(const fcExrConfig *conf, fcIGraphicsDevice *dev)
 {
-    return new fcExrContext(conf, dev);
+    fcExrConfig default_cont;
+    if (conf == nullptr) { conf = &default_cont; }
+    return new fcExrContext(*conf, dev);
 }
-#endif // fcSupportEXR

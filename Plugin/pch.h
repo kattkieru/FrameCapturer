@@ -1,4 +1,9 @@
-﻿#include <algorithm>
+﻿#ifdef _MSC_VER
+    #pragma warning(disable: 4190)
+    #define _CRT_SECURE_NO_WARNINGS
+#endif
+
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <deque>
@@ -12,3 +17,64 @@
 #include <functional>
 #include <fstream>
 #include <sstream>
+#include <filesystem>
+
+#define fcImpl
+
+#if defined(_WIN32)
+    #define fcWindows
+#elif defined(__APPLE__)
+    #ifdef TARGET_OS_IPHONE
+        #define fciOS
+    #else
+        #define fcMac
+    #endif
+#elif defined(__ANDROID__)
+    #define fcAndroid
+#elif defined(__linux__)
+    #define fcLinux
+#endif
+
+#define fcEnableLogging
+#ifdef _WIN32
+    #define fcSupportOpenGL
+    #define fcSupportD3D9
+    #define fcSupportD3D11
+
+    #define fcSupportPNG
+    #define fcSupportEXR
+    #define fcSupportGIF
+    #define fcSupportMP4
+
+    #define fcSupportHalfPixelFormat
+    #define fcSupportFAAC
+    #define fcSupportOpenH264
+    #define fcSupportNVH264
+    #define fcSupportAMDH264
+#else
+    #define fcSupportOpenGL
+
+    #define fcSupportPNG
+    #define fcSupportEXR
+    #define fcSupportGIF
+    #define fcSupportMP4
+
+    #define fcSupportHalfPixelFormat
+    #define fcSupportFAAC
+    #define fcSupportOpenH264
+    #define fcSupportNVH264
+#endif
+#ifndef fcStaticLink
+    //#define fcGIFSplitModule
+    #define fcPNGSplitModule
+    #define fcEXRSplitModule
+    #define fcMP4SplitModule
+#endif // fcStaticLink
+
+
+#ifdef fcEnableLogging
+    void DebugLogImpl(const char* fmt, ...);
+    #define fcDebugLog(...) DebugLogImpl(__VA_ARGS__)
+#else
+    #define fcDebugLog(...)
+#endif

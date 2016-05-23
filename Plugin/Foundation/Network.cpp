@@ -1,8 +1,14 @@
 #include "pch.h"
-#define CURL_STATICLIB
+#ifdef fcWindows
+    #define CURL_STATICLIB
+#endif
 #include <curl/curl.h>
 #include "Misc.h"
 
+#ifdef fcWindows
+    #pragma comment(lib, "libcurl.lib")
+    #pragma comment(lib, "ws2_32.lib")
+#endif
 
 struct HTTPContext
 {
@@ -30,6 +36,7 @@ static bool HTTPGet_Impl(const std::string &url, HTTPContext &ctx)
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, &HTTPCalback_Impl);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1);
 
     bool ret = false;
     long http_code = 0;

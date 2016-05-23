@@ -4,6 +4,8 @@
 #include <vector>
 #include <algorithm>
 
+void*       AlignedAlloc(size_t size, size_t align);
+void        AlignedFree(void *p);
 
 template<class T>
 class TDataRef
@@ -40,59 +42,74 @@ private:
 typedef TDataRef<char> DataRef;
 
 
+// low-level vector<>. T must be POD type
 template<class T>
 class TBuffer
 {
 public:
-    typedef T value_type;
-    typedef std::vector<value_type>     container;
-    typedef typename container::iterator         iterator;
-    typedef typename container::const_iterator   const_iterator;
-    typedef typename container::pointer          pointer;
-    typedef typename container::const_pointer    const_pointer;
+    typedef T           value_type;
+    typedef T*          iterator;
+    typedef const T*    const_iterator;
+    typedef T*          pointer;
+    typedef const T*    const_pointer;
 
-
-    TBuffer() {}
-    TBuffer(const void *src, size_t len) : m_data((const_pointer)src, (const_pointer)src+len) {}
-    TBuffer(const TDataRef<T> &buf) : m_data(buf.begin(), buf.end()) {}
-    TBuffer(container&& src) : m_data(src) {}
+    TBuffer() : m_data(), m_size() {}
+    explicit TBuffer(size_t size) : m_data(), m_size() { resize(size); }
+    TBuffer(const void *src, size_t len) : m_data(), m_size() { assign(src, len); }
+    TBuffer(TBuffer& v) : m_data(), m_size() { assign(v.ptr(), v.size()); }
+    TBuffer(TBuffer&& v) : m_data(v.ptr()), m_size(v.size()) {}
+    TBuffer& operator=(TBuffer& v) { assign(v.ptr(), v.size()); return *this; }
+    ~TBuffer() { clear(); }
 
     value_type&         operator[](size_t i) { return m_data[i]; }
     const value_type&   operator[](size_t i) const { return m_data[i]; }
 
-    container&      get()           { return m_data; }
-    container&&     move()          { return std::move(m_data); }
-    size_t          size() const    { return m_data.size(); }
-    bool            empty() const   { return m_data.empty(); }
-    iterator        begin()         { return m_data.begin(); }
-    iterator        end()           { return m_data.end(); }
-    const_iterator  begin() const   { return m_data.begin(); }
-    const_iterator  end() const     { return m_data.end(); }
-    pointer         ptr()           { return m_data.empty() ? nullptr : &m_data[0]; }
-    const_pointer   ptr() const     { return m_data.empty() ? nullptr : &m_data[0]; }
+    size_t          size() const    { return m_size; }
+    bool            empty() const   { return m_size == 0; }
+    iterator        begin()         { return m_data; }
+    const_iterator  begin() const   { return m_data; }
+    iterator        end()           { return m_data + m_size; }
+    const_iterator  end() const     { return m_data + m_size; }
+    pointer         ptr()           { return m_data; }
+    const_pointer   ptr() const     { return m_data; }
 
+    // src must not be part of this container
     void assign(const void *src, size_t len)
     {
-        m_data.assign((const_pointer)src, (const_pointer)src + len);
+        resize(len);
+        memcpy(ptr(), src, sizeof(T) * len);
+    }
+
+    // src must not be part of this container
+    void append(const void *src, size_t len)
+    {
+        size_t pos = size();
+        resize(pos + len);
+        memcpy(ptr() + pos, src, sizeof(T) * len);
     }
 
     void resize(size_t newsize)
     {
-        m_data.resize(newsize);
+        T *new_data = (T*)AlignedAlloc(sizeof(T) * newsize, 0x20);
+        if (m_data) {
+            memcpy(new_data, m_data, std::min<size_t>(sizeof(T) * m_size, sizeof(T) * newsize));
+        }
+
+        clear();
+        m_data = new_data;
+        m_size = newsize;
     }
 
     void clear()
     {
-        m_data.clear();
-    }
-
-    void reserve(size_t newsize)
-    {
-        m_data.reserve(newsize);
+        AlignedFree(m_data);
+        m_data = nullptr;
+        m_size = 0;
     }
 
 protected:
-    container m_data;
+    T *m_data;
+    size_t m_size;
 };
 typedef TBuffer<char> Buffer;
 
@@ -136,10 +153,12 @@ inline BinaryStream& operator>>(BinaryStream &o, double&   v) { o.read(&v, 8); r
 class BufferStream : public BinaryStream
 {
 public:
-    BufferStream(Buffer &buf)
-        : m_buf(buf), m_wpos(buf.size()), m_rpos()
-    {
-    }
+    BufferStream(Buffer &buf) : m_buf(buf), m_wpos(buf.size()), m_rpos(), m_delete_flag(false) {}
+    BufferStream(Buffer *buf, bool del) : m_buf(*buf), m_wpos(buf->size()), m_rpos(), m_delete_flag(del) {}
+    ~BufferStream() { if (m_delete_flag) { delete &m_buf; } }
+
+    Buffer& get()               { return m_buf; }
+    const Buffer& get() const   { return m_buf; }
 
     size_t tellg() override
     {
@@ -186,22 +205,28 @@ protected:
     Buffer &m_buf;
     size_t m_wpos;
     size_t m_rpos;
+    bool m_delete_flag;
 };
 
 
 class StdOStream : public BinaryStream
 {
 public:
-    StdOStream(std::ostream& os) : m_os(os) {}
+    StdOStream(std::ostream& os) : m_os(os), m_delete_flag(false) {}
+    StdOStream(std::ostream *os, bool del) : m_os(*os), m_delete_flag(del) {}
+    ~StdOStream() { if (m_delete_flag) { delete &m_os; } }
+
+    std::ostream& get()             { return m_os; }
+    const std::ostream& get() const { return m_os; }
 
     // dummy
     size_t  tellg() override { return 0; }
-    void    seekg(size_t pos) override {}
-    size_t  read(void *dst, size_t len) override { return 0; }
+    void    seekg(size_t /*pos*/) override {}
+    size_t  read(void* /*dst*/, size_t /*len*/) override { return 0; }
 
     size_t tellp() override
     {
-        return m_os.tellp();
+        return (size_t)m_os.tellp();
     }
 
     void seekp(size_t pos) override
@@ -217,17 +242,23 @@ public:
 
 protected:
     std::ostream& m_os;
+    bool m_delete_flag;
 };
 
 
 class StdIStream : public BinaryStream
 {
 public:
-    StdIStream(std::istream& is) : m_is(is) {}
+    StdIStream(std::istream& is) : m_is(is), m_delete_flag(false) {}
+    StdIStream(std::istream *is, bool del) : m_is(*is), m_delete_flag(del) {}
+    ~StdIStream() { if (m_delete_flag) { delete &m_is; } }
+
+    std::istream& get()             { return m_is; }
+    const std::istream& get() const { return m_is; }
 
     size_t tellg() override
     {
-        return m_is.tellg();
+        return (size_t)m_is.tellg();
     }
 
     void seekg(size_t pos) override
@@ -238,27 +269,33 @@ public:
     size_t read(void *dst, size_t len) override
     {
         m_is.read((char*)dst, len);
-        return m_is.gcount();
+        return (size_t)m_is.gcount();
     }
 
     // dummy
     size_t  tellp() override { return 0; }
-    void    seekp(size_t pos) override {}
-    size_t  write(const void *data, size_t len) override { return 0; }
+    void    seekp(size_t /*pos*/) override {}
+    size_t  write(const void* /*data*/, size_t /*len*/) override { return 0; }
 
 protected:
     std::istream& m_is;
+    bool m_delete_flag;
 };
 
 
 class StdIOStream : public BinaryStream
 {
 public:
-    StdIOStream(std::iostream& os) : m_ios(os) {}
+    StdIOStream(std::iostream& ios) : m_ios(ios), m_delete_flag(false) {}
+    StdIOStream(std::iostream *ios, bool del) : m_ios(*ios), m_delete_flag(del) {}
+    ~StdIOStream() { if (m_delete_flag) { delete &m_ios; } }
+
+    std::iostream& get()            { return m_ios; }
+    const std::iostream& get() const{ return m_ios; }
 
     size_t tellg() override
     {
-        return m_ios.tellg();
+        return (size_t)m_ios.tellg();
     }
 
     void seekg(size_t pos) override
@@ -269,13 +306,13 @@ public:
     size_t read(void *dst, size_t len) override
     {
         m_ios.read((char*)dst, len);
-        return m_ios.gcount();
+        return (size_t)m_ios.gcount();
     }
 
 
     size_t tellp() override
     {
-        return m_ios.tellp();
+        return (size_t)m_ios.tellp();
     }
 
     void seekp(size_t pos) override
@@ -291,6 +328,77 @@ public:
 
 protected:
     std::iostream& m_ios;
+    bool m_delete_flag;
+};
+
+
+
+typedef size_t (*tellg_t)(void *obj);
+typedef void   (*seekg_t)(void *obj, size_t pos);
+typedef size_t (*read_t)(void *obj, void *dst, size_t len);
+
+typedef size_t (*tellp_t)(void *obj);
+typedef void   (*seekp_t)(void *obj, size_t pos);
+typedef size_t (*write_t)(void *obj, const void *data, size_t len);
+
+struct CustomStreamData
+{
+    void *obj;
+    tellg_t tellg;
+    seekg_t seekg;
+    read_t  read;
+    tellp_t tellp;
+    seekp_t seekp;
+    write_t write;
+
+    CustomStreamData()
+        : obj()
+        , tellg(), seekg(), read()
+        , tellp(), seekp(), write()
+    {}
+};
+
+class CustomStream : public BinaryStream
+{
+public:
+    CustomStream(const CustomStreamData& csd) : m_csd(csd) {}
+
+    CustomStreamData& get()             { return m_csd; }
+    const CustomStreamData& get() const { return m_csd; }
+
+    size_t tellg() override
+    {
+        return m_csd.tellg(m_csd.obj);
+    }
+
+    void seekg(size_t pos) override
+    {
+        return m_csd.seekg(m_csd.obj, pos);
+    }
+
+    size_t read(void *dst, size_t len) override
+    {
+        return m_csd.read(m_csd.obj, dst, len);
+    }
+
+
+    size_t tellp() override
+    {
+        return m_csd.tellp(m_csd.obj);
+    }
+
+    void seekp(size_t pos) override
+    {
+        return m_csd.seekp(m_csd.obj, pos);
+    }
+
+    size_t write(const void *data, size_t len) override
+    {
+        return m_csd.write(m_csd.obj, data, len);
+    }
+
+private:
+    CustomStreamData m_csd;
 };
 
 

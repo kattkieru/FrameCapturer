@@ -10,15 +10,28 @@ using UnityEditor;
 
 public class FrameCapturerPackaging
 {
-    [MenuItem("Assets/FrameCapturer/MakePackage")]
+    [MenuItem("Assets/UTJ/FrameCapturer/MakePackage")]
     public static void MakePackage()
     {
-        string[] files = new string[]
+        // FrameCapturer.unitypackage
         {
-"Assets/FrameCapturer",
-"Assets/TweetMedia",
-        };
-        AssetDatabase.ExportPackage(files, "FrameCapturer.unitypackage", ExportPackageOptions.Recurse);
+            string[] files = new string[]
+            {
+                "Assets/UTJ",
+                "Assets/StreamingAssets/UTJ/FrameCapturer/License.text",
+                "Assets/StreamingAssets/UTJ/FrameCapturer/OpenH264_BinaryLicense.txt",
+            };
+            AssetDatabase.ExportPackage(files, "FrameCapturer.unitypackage", ExportPackageOptions.Recurse);
+        }
+
+        // FAACSelfBuild.unitypackage
+        {
+            string[] files = new string[]
+            {
+                "Assets/StreamingAssets/UTJ/FrameCapturer/FAAC_SelfBuild.zip",
+            };
+            AssetDatabase.ExportPackage(files, "FAACSelfBuild.unitypackage", ExportPackageOptions.Recurse);
+        }
     }
 
 }

@@ -195,7 +195,7 @@ static void jo_gif_quantize(unsigned char *rgba, int rgbaSize, int sample, unsig
 }
 
 typedef struct {
-    std::ostream *os;
+    BinaryStream *os;
     int numBits;
     unsigned char buf[256];
     unsigned char idx;
@@ -213,14 +213,14 @@ static void jo_gif_lzw_write(jo_gif_lzw_t *s, int code)
         s->outBits >>= 8;
         s->curBits -= 8;
         if (s->idx >= 255) {
-            s->os->put(s->idx);
+            (*s->os) << s->idx;
             s->os->write((char*)s->buf, s->idx);
             s->idx = 0;
         }
     }
 }
 
-static void jo_gif_lzw_encode(std::ostream &os, unsigned char *in, int len)
+static void jo_gif_lzw_encode(BinaryStream &os, unsigned char *in, int len)
 {
     jo_gif_lzw_t state;
     int maxcode = 511;
@@ -280,7 +280,7 @@ CONTINUE:
     jo_gif_lzw_write(&state, 0x101);
     jo_gif_lzw_write(&state, 0);
     if(state.idx) {
-        os.put(state.idx);
+        os << state.idx;
         os.write((char*)state.buf, state.idx);
     }
 }
@@ -295,15 +295,19 @@ jo_gif_t jo_gif_start(short width, short height, short repeat, int numColors)
     gif.height = height;
     gif.repeat = repeat;
     gif.numColors = numColors;
-    gif.palSize = log2(numColors);
+    gif.palSize = (int)log2(numColors);
     return gif;
 }
 
+
 struct jo_gif_frame_t
 {
-    std::string palette;
-    std::string indexed;
-    std::string encoded;
+    Buffer palette;
+    Buffer indexed_pixels;
+    Buffer encoded_pixels;
+    double timestamp;
+
+    jo_gif_frame_t() : timestamp() {}
 };
 
 void jo_gif_frame(jo_gif_t *gif, jo_gif_frame_t *fdata, unsigned char * rgba, int frame, bool localPalette)
@@ -357,11 +361,12 @@ void jo_gif_frame(jo_gif_t *gif, jo_gif_frame_t *fdata, unsigned char * rgba, in
         free(ditheredPixels);
     }
 
-    fdata->indexed.assign((char*)indexedPixels, size);
+    fdata->indexed_pixels.assign((char*)indexedPixels, size);
 
-    std::ostringstream pixels(std::ios::binary);
-    jo_gif_lzw_encode(pixels, indexedPixels, size);
-    fdata->encoded = pixels.str();
+    {
+        BufferStream bs(fdata->encoded_pixels);
+        jo_gif_lzw_encode(bs, indexedPixels, size);
+    }
 
     free(indexedPixels);
 }
@@ -370,10 +375,10 @@ void jo_gif_frame(jo_gif_t *gif, jo_gif_frame_t *fdata, unsigned char * rgba, in
 void jo_gif_decode(void *o_buf, jo_gif_frame_t *fdata, jo_gif_frame_t *palette_frame)
 {
     // todo: decode lzw instead of using indexed pixels
-    int num_pixels = fdata->indexed.size();
+    int num_pixels = (int)fdata->indexed_pixels.size();
     unsigned char *op = (unsigned char*)o_buf;
     unsigned char *palette = (unsigned char*)&palette_frame->palette[0];
-    unsigned char *indexed = (unsigned char*)&fdata->indexed[0];
+    unsigned char *indexed = (unsigned char*)&fdata->indexed_pixels[0];
     for (int i = 0; i < num_pixels; ++i)
     {
         int i4 = i * 4;
@@ -390,18 +395,18 @@ void jo_gif_end(jo_gif_t *)
 }
 
 
-void jo_gif_write_header(std::ostream &os, jo_gif_t *gif)
+void jo_gif_write_header(BinaryStream &os, jo_gif_t *gif)
 {
     os.write("GIF89a", 6);
     // Logical Screen Descriptor
     os.write((char*)&gif->width, 2);
     os.write((char*)&gif->height, 2);
-    os.put(0xF0 | gif->palSize);
+    os << uint8_t(0xF0 | gif->palSize);
     os.write("\x00\x00", 2); // bg color index (unused), aspect ratio
 }
 
 
-void jo_gif_write_frame(std::ostream &os, jo_gif_t *gif, jo_gif_frame_t *fdata, jo_gif_frame_t *palette_optional, int frame, short delayCsec)
+void jo_gif_write_frame(BinaryStream &os, jo_gif_t *gif, jo_gif_frame_t *fdata, jo_gif_frame_t *palette_optional, int frame, short delayCsec)
 {
     short width = gif->width;
     short height = gif->height;
@@ -410,11 +415,11 @@ void jo_gif_write_frame(std::ostream &os, jo_gif_t *gif, jo_gif_frame_t *fdata, 
     int palette_size = 0;
     if (palette_optional != nullptr) {
         palette = (unsigned char*)&palette_optional->palette[0];
-        palette_size = palette_optional->palette.size();
+        palette_size = (int)palette_optional->palette.size();
     }
     else {
         palette = fdata->palette.empty() ? nullptr : (unsigned char*)&fdata->palette[0];
-        palette_size = fdata->palette.size();
+        palette_size = (int)fdata->palette.size();
     }
 
     if (frame == 0) {
@@ -424,7 +429,7 @@ void jo_gif_write_frame(std::ostream &os, jo_gif_t *gif, jo_gif_frame_t *fdata, 
             // Netscape Extension
             os.write("\x21\xff\x0bNETSCAPE2.0\x03\x01", 16);
             os.write((char*)&gif->repeat, 2); // loop count (extra iterations, 0=repeat forever)
-            os.put(0); // block terminator
+            os << uint8_t(0); // block terminator
         }
     }
     // Graphic Control Extension
@@ -436,19 +441,20 @@ void jo_gif_write_frame(std::ostream &os, jo_gif_t *gif, jo_gif_frame_t *fdata, 
     os.write((char*)&width, 2);
     os.write((char*)&height, 2);
     if (frame == 0 || !palette) {
-        os.put(0);
+        os << uint8_t(0);
     }
     else {
-        os.put(0x80 | gif->palSize);
+        os << uint8_t(0x80 | gif->palSize);
         os.write((char*)palette, palette_size);
     }
-    os.put(8); // block terminator
-    os.write(&fdata->encoded[0], fdata->encoded.size());
-    os.put(0); // block terminator
+    os << uint8_t(8); // block terminator
+    os.write(&fdata->encoded_pixels[0], fdata->encoded_pixels.size());
+    os << uint8_t(0); // block terminator
 }
 
-void jo_gif_write_footer(std::ostream &os, jo_gif_t *)
+void jo_gif_write_footer(BinaryStream &os, jo_gif_t *)
 {
-    os.put(0x3b); // gif trailer
+    os << uint8_t(0x3b); // gif trailer
 }
 #endif
+

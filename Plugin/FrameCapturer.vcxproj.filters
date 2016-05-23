@@ -1,7 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="fcThreadPool.cpp" />
     <ClCompile Include="FrameCapturer.cpp" />
     <ClCompile Include="pch.cpp" />
     <ClCompile Include="GraphicsDevice\fcGraphicsDeviceD3D9.cpp">
@@ -19,12 +18,8 @@
     <ClCompile Include="Encoder\fcGifFile.cpp">
       <Filter>Encoder</Filter>
     </ClCompile>
-    <ClCompile Include="Foundation\Misc.cpp">
-      <Filter>Foundation</Filter>
-    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="fcThreadPool.h" />
     <ClInclude Include="FrameCapturer.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="GraphicsDevice\fcGraphicsDevice.h">
@@ -33,13 +28,6 @@
     <ClInclude Include="Encoder\fcGifFile.h">
       <Filter>Encoder</Filter>
     </ClInclude>
-    <ClInclude Include="fcFoundation.h" />
-    <ClInclude Include="Foundation\Misc.h">
-      <Filter>Foundation</Filter>
-    </ClInclude>
-    <ClInclude Include="Foundation\fcFoundation.h">
-      <Filter>Foundation</Filter>
-    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="GraphisDevice">
@@ -47,9 +35,6 @@
     </Filter>
     <Filter Include="Encoder">
       <UniqueIdentifier>{48802eb2-d965-4472-acfa-f45fccdf33ac}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="Foundation">
-      <UniqueIdentifier>{c863ed7a-e964-489f-9599-5197cdbbe7f4}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
 </Project>

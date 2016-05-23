@@ -1,14 +1,6 @@
 ﻿#ifndef fcMisc_h
 #define fcMisc_h
 
-#include "FrameCapturer.h"
-
-#ifdef fcMSVC
-    #define fcThreadLocal __declspec(thread)
-#else
-    #define fcThreadLocal thread_local
-#endif
-
 #ifdef fcWindows
     #define fcDLLExt ".dll"
 #else 
@@ -29,21 +21,30 @@ const char* DLLGetDirectoryOfCurrentModule();
 void*       AlignedAlloc(size_t size, size_t align);
 void        AlignedFree(void *p);
 
-uint64_t    GetCurrentTimeNanosec();
+double      GetCurrentTimeSec();
 
+// execute command and **wait until it ends**
+// return exit-code
+int         Execute(const char *command);
 
 
 // -------------------------------------------------------------
 // Compression
 // -------------------------------------------------------------
 
-// if dst.size() == 0, resize to 1024*1024 first.
-// while decompress failed because dst.size() is not enough, double it and retry.
+// src is on-memory bz2 data
+// while decompress failed because of dst.size() is not enough, double it and retry.
+// (if dst.size() == 0, resize to 1024*1024 before first try)
+// dst.size() will be size of decompressed buffer size if succeeded.
 bool    BZ2Decompress(std::vector<char> &dst, const void *src, size_t src_len);
 
+// src is on-memory bz2 data
 // return decompressed size if successfully decompressed and written to file. otherwise 0.
 size_t  BZ2DecompressToFile(const char *dst_path, const void *src, size_t src_len);
 
+// return decompressed file count
+typedef std::function<void(const char*)> UnzipFileHandler;
+size_t Unzip(const char *dst_path, const char *archive, const UnzipFileHandler& h = UnzipFileHandler());
 
 // -------------------------------------------------------------
 // Network
@@ -108,9 +109,5 @@ inline IntType ceildiv(IntType a, IntType b)
 {
     return a / b + (a%b == 0 ? 0 : 1);
 }
-
-
-int fcGetPixelSize(fcTextureFormat format);
-int fcGetPixelSize(fcPixelFormat format);
 
 #endif // fcMisc_h

@@ -1,12 +1,36 @@
 #include "pch.h"
-#include "FrameCapturer.h"
-#include "Misc.h"
+#include "fcFoundation.h"
 
 #ifdef fcWindows
     #include <windows.h>
 #else
     #include <dlfcn.h>
 #endif
+
+
+void DebugLogImpl(const char* fmt, ...)
+{
+#ifdef fcWindows
+
+    char buf[2048];
+    va_list vl;
+    va_start(vl, fmt);
+    vsprintf(buf, fmt, vl);
+    ::OutputDebugStringA(buf);
+    va_end(vl);
+
+#else // fcWindows
+
+    char buf[2048];
+    va_list vl;
+    va_start(vl, fmt);
+    vprintf(fmt, vl);
+    va_end(vl);
+
+#endif // fcWindows
+}
+
+
 
 #ifdef fcWindows
 
@@ -28,7 +52,7 @@ void DLLAddSearchPath(const char *path_to_add)
     std::string path;
     path.resize(1024 * 64);
 
-    DWORD ret = ::GetEnvironmentVariableA("PATH", &path[0], path.size());
+    DWORD ret = ::GetEnvironmentVariableA("PATH", &path[0], (DWORD)path.size());
     path.resize(ret);
     path += ";";
     path += path_to_add;
@@ -87,7 +111,7 @@ void AlignedFree(void *p)
 #endif
 }
 
-uint64_t GetCurrentTimeNanosec()
+double GetCurrentTimeSec()
 {
 #ifdef fcWindows
     static LARGE_INTEGER g_freq = { 0, 0 };
@@ -97,60 +121,51 @@ uint64_t GetCurrentTimeNanosec()
 
     LARGE_INTEGER t;
     ::QueryPerformanceCounter(&t);
-    return u64(double(t.QuadPart) / double(g_freq.QuadPart) * 1000000000.0);
+    return double(t.QuadPart) / double(g_freq.QuadPart);
 #else
     timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    return ts.tv_nsec;
+    return (double)ts.tv_nsec / 1000000000.0;
 #endif
 }
 
-
-
-int fcGetPixelSize(fcTextureFormat format)
+#ifdef fcWindows
+void fcWinPrintLastError()
 {
-    switch (format)
-    {
-    case fcTextureFormat_ARGB32:    return 4;
+    auto code = ::GetLastError();
+    char buf[1024];
 
-    case fcTextureFormat_ARGBHalf:  return 8;
-    case fcTextureFormat_RGHalf:    return 4;
-    case fcTextureFormat_RHalf:     return 2;
-
-    case fcTextureFormat_ARGBFloat: return 16;
-    case fcTextureFormat_RGFloat:   return 8;
-    case fcTextureFormat_RFloat:    return 4;
-
-    case fcTextureFormat_ARGBInt:   return 16;
-    case fcTextureFormat_RGInt:     return 8;
-    case fcTextureFormat_RInt:      return 4;
-    }
-    return 0;
+    ::FormatMessageA(
+        FORMAT_MESSAGE_FROM_SYSTEM,
+        nullptr, ::GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        buf, sizeof(buf), nullptr);
+    fcDebugLog("fcWinPrintLastError(): %s", buf);
 }
+#endif
 
-int fcGetPixelSize(fcPixelFormat format)
+int Execute(const char *command_)
 {
-    switch (format)
-    {
-    case fcPixelFormat_RGBA8:       return 4;
-    case fcPixelFormat_RGB8:        return 3;
-    case fcPixelFormat_RG8:         return 2;
-    case fcPixelFormat_R8:          return 1;
-
-    case fcPixelFormat_RGBAHalf:    return 8;
-    case fcPixelFormat_RGBHalf:     return 6;
-    case fcPixelFormat_RGHalf:      return 4;
-    case fcPixelFormat_RHalf:       return 2;
-
-    case fcPixelFormat_RGBAFloat:   return 16;
-    case fcPixelFormat_RGBFloat:    return 12;
-    case fcPixelFormat_RGFloat:     return 8;
-    case fcPixelFormat_RFloat:      return 4;
-
-    case fcPixelFormat_RGBAInt:     return 16;
-    case fcPixelFormat_RGBInt:      return 12;
-    case fcPixelFormat_RGInt:       return 8;
-    case fcPixelFormat_RInt:        return 4;
+#ifdef fcWindows
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof(si));
+    memset(&pi, 0, sizeof(pi));
+    si.cb = sizeof(si);
+    std::string command = command_; // CreateProcessA() require **non const** string...
+    if (::CreateProcessA(nullptr, (LPSTR)command.c_str(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) == TRUE) {
+        DWORD exit_code = 0;
+        ::WaitForSingleObject(pi.hThread, INFINITE);
+        ::WaitForSingleObject(pi.hProcess, INFINITE);
+        ::GetExitCodeProcess(pi.hProcess, &exit_code);
+        ::CloseHandle(pi.hThread);
+        ::CloseHandle(pi.hProcess);
+        return exit_code;
     }
-    return 0;
+    else {
+        fcWinPrintLastError();
+    }
+    return 1;
+#else
+    return std::system(command);
+#endif
 }
